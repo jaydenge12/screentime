@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Inloggen + Website Tijdbeheer</title>
+  <style>
+    body{font-family:Inter,system-ui,Segoe UI,Arial;margin:1rem;background:#f7f7fb;color:#111}
+    .card{background:white;border-radius:12px;padding:1rem;margin:1rem 0;box-shadow:0 6px 18px rgba(12,12,30,0.06)}
+    label{display:block;margin:8px 0 4px;font-weight:600}
+    input,select,button{padding:8px;border-radius:8px;border:1px solid #ddd;width:100%;box-sizing:border-box}
+    button{cursor:pointer}
+    .row{display:flex;gap:.5rem}
+    .row > *{flex:1}
+    .hidden{display:none}
+    .muted{color:#666;font-size:.9rem}
+    .connected{color:green;font-weight:700}
+  </style>
+</head>
+<body>
+<h2>Login + Website Tijdbeheer</h2>
+<div id="loginCard" class="card">
+  <h3>Inloggen (demo lokaal)</h3>
+  <label>E-mail</label>
+  <input id="username" value="" />
+  <label>Wachtwoord</label>
+  <input id="password" type="password" />
+  <div style="margin-top:.5rem;display:flex;gap:.5rem">
+    <button id="loginBtn">Log in</button>
+    <button id="registerBtn">Registreer</button>
+  </div>
+  <p class="muted">(Demo: gegevens lokaal opgeslagen)</p>
+</div>
+
+<div id="app" class="hidden">
+  <div class="card">
+    <h3>Informatie - ingelogd als <span id="currentUser"></span></h3>
+    <p id="dailyInfo" class="muted"></p>
+    <p>Resterende tijd kind: <span id="childTime">--:--:--</span></p>
+    <label>Daglimiet (minuten)</label>
+    <input id="dailyLimitInput" type="number" value="30" min="1" />
+    <button id="updateDailyLimit">Update daglimiet</button>
+    <button id="logoutBtn">Uitloggen</button>
+  </div>
+
+  <div class="card">
+    <h3>Tijdplannen voor websites</h3>
+    <label>Website</label>
+    <select id="siteSelect">
+      <option value="">-- Selecteer een website --</option>
+      <option value="https://flowlab.io">https://flowlab.io</option>
+      <option value="https://mimo.org">https://mimo.org</option>
+      <option value="custom">-- eigen URL --</option>
+    </select>
+    <input id="customUrl" class="hidden" placeholder="https://voorbeeld.nl" />
+    <label>Toegestane tijd (minuten)</label>
+    <input id="minutes" type="number" value="15" min="1" />
+    <button id="startSite">Start sessie</button>
+  </div>
+
+  <div class="card">
+    <h3>Bluetooth Verbinding</h3>
+    <p class="muted">Bluetooth niet beschikbaar in deze omgeving</p>
+  </div>
+</div>
+
+<script>
+let DAILY_LIMIT_MIN = 30;
+const DEFAULT_SESSION_MIN = 15;
+const SEEDED_USERS = {'jaydengeerts@gmail.com':'jaydentijd'};
+
+const loginCard = document.getElementById('loginCard');
+const app = document.getElementById('app');
+const loginBtn = document.getElementById('loginBtn');
+const registerBtn = document.getElementById('registerBtn');
+const usernameInput = document.getElementById('username');
+const passwordInput = document.getElementById('password');
+const currentUserSpan = document.getElementById('currentUser');
+const dailyInfo = document.getElementById('dailyInfo');
+const logoutBtn = document.getElementById('logoutBtn');
+const childTime = document.getElementById('childTime');
+const startSiteBtn = document.getElementById('startSite');
+const siteSelect = document.getElementById('siteSelect');
+const customUrl = document.getElementById('customUrl');
+const minutesInput = document.getElementById('minutes');
+const dailyLimitInput = document.getElementById('dailyLimitInput');
+const updateDailyLimitBtn = document.getElementById('updateDailyLimit');
+
+function loadUsers(){ return JSON.parse(localStorage.getItem('demoUsers')||'{}'); }
+function saveUsers(users){ localStorage.setItem('demoUsers', JSON.stringify(users)); }
+function seedUsers(){ const users=loadUsers(); let changed=false; Object.entries(SEEDED_USERS).forEach(([u,p])=>{ if(!users[u]){ users[u]=p; changed=true; } }); if(changed) saveUsers(users); }
+seedUsers();
+
+registerBtn.addEventListener('click', ()=>{
+  const u=usernameInput.value.trim(), p=passwordInput.value;
+  if(!u||!p){ alert('voer e-mail en wachtwoord in'); return; }
+  const users=loadUsers(); if(users[u] && !confirm('Gebruiker bestaat al. Overschrijven?')) return;
+  users[u]=p; saveUsers(users); alert('Geregistreerd (lokaal)');
+});
+
+loginBtn.addEventListener('click', ()=>{ attemptLogin(usernameInput.value.trim(), passwordInput.value); });
+function attemptLogin(u,p){
+  const users=loadUsers();
+  if(users[u] && users[u]===p){
+    localStorage.setItem('loggedInUser', u);
+    showApp(u);
+  } else alert('ongeldige inloggegevens');
+}
+
+logoutBtn.addEventListener('click', ()=>{ localStorage.removeItem('loggedInUser'); location.reload(); });
+
+updateDailyLimitBtn.addEventListener('click', ()=>{
+  let newLimit = parseInt(dailyLimitInput.value);
+  if(isNaN(newLimit) || newLimit < 1){ alert('Voer een geldige daglimiet in'); return; }
+  DAILY_LIMIT_MIN = newLimit;
+  alert('Daglimiet bijgewerkt naar '+DAILY_LIMIT_MIN+' minuten');
+});
+
+function showApp(user){
+  loginCard.classList.add('hidden');
+  app.classList.remove('hidden');
+  currentUserSpan.textContent = user;
+  updateUsageDisplay(user);
+}
+
+function getUsageKey(user){ return 'usage_'+user; }
+function loadUsage(user){
+  const data = JSON.parse(localStorage.getItem(getUsageKey(user))||'{}');
+  const today=(new Date()).toISOString().slice(0,10);
+  if(!data.date || data.date!==today) return {date:today, usedSeconds:0};
+  return data;
+}
+function saveUsage(user,usage){ localStorage.setItem(getUsageKey(user), JSON.stringify(usage)); }
+
+function updateUsageDisplay(user){
+  const usage = loadUsage(user);
+  const remainToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  dailyInfo.textContent = `Vandaag gebruikt: ${Math.ceil(usage.usedSeconds/60)} min — Resterend: ${Math.floor(remainToday/60)} min`;
+}
+
+let sessionEnd=null;
+
+startSiteBtn.addEventListener('click', ()=>{
+  const user=localStorage.getItem('loggedInUser');
+  if(!user){ alert('niet ingelogd'); return; }
+
+  const site = siteSelect.value;
+  if(!site || site===''){ alert('Selecteer eerst een website voordat je tijd start'); return; }
+
+  let mins=parseInt(minutesInput.value)||DEFAULT_SESSION_MIN;
+  const usage=loadUsage(user);
+  const remainingToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  if(mins*60 > remainingToday){ alert('Niet genoeg resterende tijd vandaag'); return; }
+
+  sessionEnd = Date.now() + mins*60*1000;
+  usage.usedSeconds += mins*60;
+  saveUsage(user, usage);
+  updateUsageDisplay(user);
+});
+
+setInterval(()=>{
+  const user=localStorage.getItem('loggedInUser');
+  if(!user) return;
+  const usage=loadUsage(user);
+  const remainToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  dailyInfo.textContent = `Vandaag gebruikt: ${Math.ceil(usage.usedSeconds/60)} min — Resterend: ${Math.floor(remainToday/60)} min`;
+
+  if(sessionEnd){
+    const remSec=Math.max(0, Math.floor((sessionEnd-Date.now())/1000));
+    const h=Math.floor(remSec/3600), m=Math.floor((remSec%3600)/60), s=remSec%60;
+    childTime.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    if(remSec<=0) sessionEnd=null;
+  } else {
+    childTime.textContent='--:--:--';
+  }
+},1000);
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Inloggen + Website Tijdbeheer</title>
+  <style>
+    body{font-family:Inter,system-ui,Segoe UI,Arial;margin:1rem;background:#f7f7fb;color:#111}
+    .card{background:white;border-radius:12px;padding:1rem;margin:1rem 0;box-shadow:0 6px 18px rgba(12,12,30,0.06)}
+    label{display:block;margin:8px 0 4px;font-weight:600}
+    input,select,button{padding:8px;border-radius:8px;border:1px solid #ddd;width:100%;box-sizing:border-box}
+    button{cursor:pointer}
+    .row{display:flex;gap:.5rem}
+    .row > *{flex:1}
+    .hidden{display:none}
+    .muted{color:#666;font-size:.9rem}
+    .connected{color:green;font-weight:700}
+  </style>
+</head>
+<body>
+<h2>Login + Website Tijdbeheer</h2>
+<div id="loginCard" class="card">
+  <h3>Inloggen (demo lokaal)</h3>
+  <label>E-mail</label>
+  <input id="username" value="" />
+  <label>Wachtwoord</label>
+  <input id="password" type="password" />
+  <div style="margin-top:.5rem;display:flex;gap:.5rem">
+    <button id="loginBtn">Log in</button>
+    <button id="registerBtn">Registreer</button>
+  </div>
+  <p class="muted">(Demo: gegevens lokaal opgeslagen)</p>
+</div>
+
+<div id="app" class="hidden">
+  <div class="card">
+    <h3>Informatie - ingelogd als <span id="currentUser"></span></h3>
+    <p id="dailyInfo" class="muted"></p>
+    <p>Resterende tijd kind: <span id="childTime">--:--:--</span></p>
+    <label>Daglimiet (minuten)</label>
+    <input id="dailyLimitInput" type="number" value="30" min="1" />
+    <button id="updateDailyLimit">Update daglimiet</button>
+    <button id="logoutBtn">Uitloggen</button>
+  </div>
+
+  <div class="card">
+    <h3>Tijdplannen voor websites</h3>
+    <label>Website</label>
+    <select id="siteSelect">
+      <option value="">-- Selecteer een website --</option>
+      <option value="https://flowlab.io">https://flowlab.io</option>
+      <option value="https://mimo.org">https://mimo.org</option>
+      <option value="custom">-- eigen URL --</option>
+    </select>
+    <input id="customUrl" class="hidden" placeholder="https://voorbeeld.nl" />
+    <label>Toegestane tijd (minuten)</label>
+    <input id="minutes" type="number" value="15" min="1" />
+    <button id="startSite">Start sessie</button>
+  </div>
+
+  <div class="card">
+    <h3>Bluetooth Verbinding</h3>
+    <p class="muted">Bluetooth niet beschikbaar in deze omgeving</p>
+  </div>
+</div>
+
+<script>
+let DAILY_LIMIT_MIN = 30;
+const DEFAULT_SESSION_MIN = 15;
+const SEEDED_USERS = {'jaydengeerts@gmail.com':'jaydentijd'};
+
+const loginCard = document.getElementById('loginCard');
+const app = document.getElementById('app');
+const loginBtn = document.getElementById('loginBtn');
+const registerBtn = document.getElementById('registerBtn');
+const usernameInput = document.getElementById('username');
+const passwordInput = document.getElementById('password');
+const currentUserSpan = document.getElementById('currentUser');
+const dailyInfo = document.getElementById('dailyInfo');
+const logoutBtn = document.getElementById('logoutBtn');
+const childTime = document.getElementById('childTime');
+const startSiteBtn = document.getElementById('startSite');
+const siteSelect = document.getElementById('siteSelect');
+const customUrl = document.getElementById('customUrl');
+const minutesInput = document.getElementById('minutes');
+const dailyLimitInput = document.getElementById('dailyLimitInput');
+const updateDailyLimitBtn = document.getElementById('updateDailyLimit');
+
+function loadUsers(){ return JSON.parse(localStorage.getItem('demoUsers')||'{}'); }
+function saveUsers(users){ localStorage.setItem('demoUsers', JSON.stringify(users)); }
+function seedUsers(){ const users=loadUsers(); let changed=false; Object.entries(SEEDED_USERS).forEach(([u,p])=>{ if(!users[u]){ users[u]=p; changed=true; } }); if(changed) saveUsers(users); }
+seedUsers();
+
+registerBtn.addEventListener('click', ()=>{
+  const u=usernameInput.value.trim(), p=passwordInput.value;
+  if(!u||!p){ alert('voer e-mail en wachtwoord in'); return; }
+  const users=loadUsers(); if(users[u] && !confirm('Gebruiker bestaat al. Overschrijven?')) return;
+  users[u]=p; saveUsers(users); alert('Geregistreerd (lokaal)');
+});
+
+loginBtn.addEventListener('click', ()=>{ attemptLogin(usernameInput.value.trim(), passwordInput.value); });
+function attemptLogin(u,p){
+  const users=loadUsers();
+  if(users[u] && users[u]===p){
+    localStorage.setItem('loggedInUser', u);
+    showApp(u);
+  } else alert('ongeldige inloggegevens');
+}
+
+logoutBtn.addEventListener('click', ()=>{ localStorage.removeItem('loggedInUser'); location.reload(); });
+
+updateDailyLimitBtn.addEventListener('click', ()=>{
+  let newLimit = parseInt(dailyLimitInput.value);
+  if(isNaN(newLimit) || newLimit < 1){ alert('Voer een geldige daglimiet in'); return; }
+  DAILY_LIMIT_MIN = newLimit;
+  alert('Daglimiet bijgewerkt naar '+DAILY_LIMIT_MIN+' minuten');
+});
+
+function showApp(user){
+  loginCard.classList.add('hidden');
+  app.classList.remove('hidden');
+  currentUserSpan.textContent = user;
+  updateUsageDisplay(user);
+}
+
+function getUsageKey(user){ return 'usage_'+user; }
+function loadUsage(user){
+  const data = JSON.parse(localStorage.getItem(getUsageKey(user))||'{}');
+  const today=(new Date()).toISOString().slice(0,10);
+  if(!data.date || data.date!==today) return {date:today, usedSeconds:0};
+  return data;
+}
+function saveUsage(user,usage){ localStorage.setItem(getUsageKey(user), JSON.stringify(usage)); }
+
+function updateUsageDisplay(user){
+  const usage = loadUsage(user);
+  const remainToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  dailyInfo.textContent = `Vandaag gebruikt: ${Math.ceil(usage.usedSeconds/60)} min — Resterend: ${Math.floor(remainToday/60)} min`;
+}
+
+let sessionEnd=null;
+
+startSiteBtn.addEventListener('click', ()=>{
+  const user=localStorage.getItem('loggedInUser');
+  if(!user){ alert('niet ingelogd'); return; }
+
+  const site = siteSelect.value;
+  if(!site || site===''){ alert('Selecteer eerst een website voordat je tijd start'); return; }
+
+  let mins=parseInt(minutesInput.value)||DEFAULT_SESSION_MIN;
+  const usage=loadUsage(user);
+  const remainingToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  if(mins*60 > remainingToday){ alert('Niet genoeg resterende tijd vandaag'); return; }
+
+  sessionEnd = Date.now() + mins*60*1000;
+  usage.usedSeconds += mins*60;
+  saveUsage(user, usage);
+  updateUsageDisplay(user);
+});
+
+setInterval(()=>{
+  const user=localStorage.getItem('loggedInUser');
+  if(!user) return;
+  const usage=loadUsage(user);
+  const remainToday = Math.max(0, DAILY_LIMIT_MIN*60 - usage.usedSeconds);
+  dailyInfo.textContent = `Vandaag gebruikt: ${Math.ceil(usage.usedSeconds/60)} min — Resterend: ${Math.floor(remainToday/60)} min`;
+
+  if(sessionEnd){
+    const remSec=Math.max(0, Math.floor((sessionEnd-Date.now())/1000));
+    const h=Math.floor(remSec/3600), m=Math.floor((remSec%3600)/60), s=remSec%60;
+    childTime.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    if(remSec<=0) sessionEnd=null;
+  } else {
+    childTime.textContent='--:--:--';
+  }
+},1000);
+</script>
+</body>
+</html>
